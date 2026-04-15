@@ -2,7 +2,27 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields: uid, displayName, email, photoURL, location, language, createdAt
+    //
+    // Collection: farms
+    // Fields: userId, farmSize, cropsGrown, location, updatedAt
+    //
+    // Collection: reports
+    // Fields: userId, userName, crop_type, suspected_issue, issue, severity, 
+    //         severity_score, explanation, risk_factors, mitigation_strategy,
+    //         immediate_actions, long_term_prevention, urgency_level, category,
+    //         spread_type, duration_days, confidence_score, economic_risk,
+    //         lat, lng, timestamp, imageUrl
+
+    // ===============================================================
     // Helper Functions
+    // ===============================================================
+    
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -17,12 +37,29 @@ service cloud.firestore {
          (request.auth.token.email == "varunkhandelwal16nov@gmail.com" && request.auth.token.email_verified == true));
     }
 
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid is string &&
+             data.email is string;
+    }
+
+    function isValidReport(data) {
+      return data.keys().hasAll(['userId', 'timestamp']) &&
+             data.userId == request.auth.uid &&
+             data.timestamp is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
     // User Profiles
     match /users/{userId} {
       allow read: if isAuthenticated();
-      allow create: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
       allow update: if isOwner(userId) && 
-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']));
+        isValidUser(request.resource.data) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'uid']));
     }
 
     // Farm Profiles
@@ -34,8 +71,11 @@ service cloud.firestore {
     // Farm Reports
     match /reports/{reportId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
-      allow update, delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && isValidReport(request.resource.data);
+      allow update: if isAuthenticated() && 
+        (resource.data.userId == request.auth.uid || isAdmin()) &&
+        request.resource.data.userId == resource.data.userId;
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
     }
   }
 }

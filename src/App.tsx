@@ -2,16 +2,19 @@ import React, { useState, useRef, useEffect, Suspense, useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Float, MeshDistortMaterial, Sphere, PerspectiveCamera } from '@react-three/drei';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Camera, Mic, Send, Leaf, AlertTriangle, CheckCircle2, Info, Activity, Globe, ShieldCheck, ChevronRight, X, LogOut, History, Map as MapIcon, User, Settings, Zap, TrendingUp, BarChart3, LocateFixed, Thermometer, Droplets, Wind } from 'lucide-react';
+import { Camera, Mic, Send, Leaf, AlertTriangle, CheckCircle2, Info, Activity, Globe, ShieldCheck, ChevronRight, X, LogOut, History, Map as MapIcon, User, Settings, Zap, TrendingUp, BarChart3, LocateFixed, Thermometer, Droplets, Wind, Volume2 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { cn } from './lib/utils';
 import { auth, db, signInWithGoogle, logout } from './firebase';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { collection, addDoc, query, where, onSnapshot, orderBy, serverTimestamp, doc, setDoc, getDoc, limit } from 'firebase/firestore';
 import { useTranslation } from 'react-i18next';
-import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { MapContainer, TileLayer, CircleMarker, Popup, useMap, Marker } from 'react-leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell } from 'recharts';
 import 'leaflet/dist/leaflet.css';
+import 'leaflet.markercluster/dist/MarkerCluster.css';
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import './i18n';
 
 // --- Map Fix for Leaflet ---
@@ -47,17 +50,98 @@ function AnimatedBackground() {
   );
 }
 
+// --- Error Boundary ---
+class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-[#020617] text-white flex flex-col items-center justify-center p-10 text-center">
+          <AlertTriangle className="w-16 h-16 text-red-500 mb-6" />
+          <h2 className="text-3xl font-black mb-4">System Error</h2>
+          <pre className="bg-white/5 p-6 rounded-2xl border border-white/10 text-xs text-red-400 max-w-2xl overflow-auto mb-8">
+            {this.state.error?.message || JSON.stringify(this.state.error)}
+          </pre>
+          <button onClick={() => window.location.reload()} className="px-8 py-4 bg-emerald-500 rounded-xl font-bold">Restart System</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // --- App Component ---
 export default function App() {
-  const [user, loading] = useAuthState(auth);
+  const [user, loading, authError] = useAuthState(auth);
   const { t, i18n } = useTranslation();
   const [view, setView] = useState<'scan' | 'history' | 'map' | 'profile'>('scan');
+  
+  // Debugging Auth
+  useEffect(() => {
+    console.log("Auth State:", { user: user?.email, loading, authError });
+  }, [user, loading, authError]);
+
+  const handleLogin = async () => {
+    try {
+      await signInWithGoogle();
+    } catch (err: any) {
+      console.error("Login Error:", err);
+      setError("Login failed: " + err.message);
+    }
+  };
   const [reports, setReports] = useState<any[]>([]);
   const [networkReports, setNetworkReports] = useState<any[]>([]);
   const [location, setLocation] = useState<{lat: number, lng: number} | null>(null);
   const [farmProfile, setFarmProfile] = useState<any>(null);
   const [simulationResult, setSimulationResult] = useState<any>(null);
   const [isSimulating, setIsSimulating] = useState(false);
+  const [mapFilter, setMapFilter] = useState({ crop: 'all', severity: 'all' });
+
+  // --- Outbreak Detection Logic ---
+  const outbreaks = useMemo(() => {
+    const clusters: any[] = [];
+    const radius = 0.5; // Roughly 50km
+    
+    networkReports.forEach(report => {
+      let found = false;
+      for (const cluster of clusters) {
+        const dist = Math.sqrt(Math.pow(report.lat - cluster.lat, 2) + Math.pow(report.lng - cluster.lng, 2));
+        if (dist < radius && report.issue === cluster.issue) {
+          cluster.count++;
+          cluster.reports.push(report);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        clusters.push({
+          lat: report.lat,
+          lng: report.lng,
+          issue: report.issue,
+          count: 1,
+          reports: [report]
+        });
+      }
+    });
+    return clusters.filter(c => c.count >= 3); // Outbreak if 3+ similar cases
+  }, [networkReports]);
+
+  const filteredReports = useMemo(() => {
+    return networkReports.filter(r => {
+      const cropMatch = mapFilter.crop === 'all' || r.crop_type?.toLowerCase() === mapFilter.crop.toLowerCase();
+      const severityMatch = mapFilter.severity === 'all' || 
+        (mapFilter.severity === 'high' && r.severity_score >= 7) ||
+        (mapFilter.severity === 'medium' && r.severity_score >= 4 && r.severity_score < 7) ||
+        (mapFilter.severity === 'low' && r.severity_score < 4);
+      return cropMatch && severityMatch;
+    });
+  }, [networkReports, mapFilter]);
 
   // --- Geolocation ---
   useEffect(() => {
@@ -70,12 +154,15 @@ export default function App() {
 
   // --- Network Intelligence (Global Reports) ---
   useEffect(() => {
+    if (!user) return;
     const q = query(collection(db, 'reports'), orderBy('timestamp', 'desc'), limit(100));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setNetworkReports(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }, (error) => {
+      console.error("Network Intelligence Error:", error);
     });
     return () => unsubscribe();
-  }, []);
+  }, [user]);
 
   // --- Farm Profile ---
   useEffect(() => {
@@ -327,7 +414,8 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="min-h-screen relative overflow-hidden bg-[#020617] text-white font-sans">
+      <ErrorBoundary>
+        <div className="min-h-screen relative overflow-hidden bg-[#020617] text-white font-sans">
         <AnimatedBackground />
         
         {/* Navigation */}
@@ -344,10 +432,10 @@ export default function App() {
             <a href="#impact" className="hover:text-emerald-400 transition-colors">Impact</a>
           </div>
           <button 
-            onClick={signInWithGoogle}
+            onClick={handleLogin}
             className="px-6 py-2.5 bg-white text-black rounded-full font-bold text-sm hover:bg-emerald-400 hover:text-white transition-all active:scale-95 shadow-lg shadow-white/5"
           >
-            Get Started
+            {user ? 'Go to Dashboard' : 'Get Started'}
           </button>
         </nav>
 
@@ -377,11 +465,11 @@ export default function App() {
 
               <div className="flex flex-col sm:flex-row gap-4 pt-4">
                 <button 
-                  onClick={signInWithGoogle}
+                  onClick={handleLogin}
                   className="px-10 py-5 bg-emerald-500 text-white rounded-2xl font-bold text-lg shadow-[0_20px_40px_rgba(16,185,129,0.2)] hover:bg-emerald-400 hover:-translate-y-1 transition-all active:scale-95 flex items-center justify-center gap-3"
                 >
                   <Globe className="w-6 h-6" />
-                  Launch Dashboard
+                  {user ? 'Enter Dashboard' : 'Launch Dashboard'}
                 </button>
                 <div className="flex items-center gap-4 px-6 py-5 bg-white/5 backdrop-blur-md rounded-2xl border border-white/10">
                   <div className="flex -space-x-3">
@@ -485,11 +573,13 @@ export default function App() {
           <p className="text-white/20 text-xs font-bold uppercase tracking-[0.3em]">© 2026 AgriFuse Intelligence Network. All Rights Reserved.</p>
         </footer>
       </div>
+    </ErrorBoundary>
     );
   }
 
   return (
-    <div className="min-h-screen relative font-sans bg-[#020617] text-white overflow-x-hidden">
+    <ErrorBoundary>
+      <div className="min-h-screen relative font-sans bg-[#020617] text-white overflow-x-hidden">
       <AnimatedBackground />
       
       {/* Sidebar / Nav */}
@@ -618,19 +708,25 @@ export default function App() {
                   >
                     <div className="glass-card rounded-[3.5rem] p-10 border-white/10 shadow-2xl space-y-8">
                       <div className="flex justify-between items-start">
-                        <div className="space-y-2">
-                          <p className="text-[10px] font-black text-emerald-500 uppercase tracking-[0.3em]">{t('diagnosis')}</p>
-                          <h3 className="text-5xl font-black font-display tracking-tighter">{result.farmer_response.issue}</h3>
+                        <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
+                          <div className="space-y-2">
+                            <p className="text-[10px] font-black text-emerald-500 uppercase tracking-[0.3em]">{t('diagnosis')}</p>
+                            <h3 className="text-5xl font-black font-display tracking-tighter">{result.farmer_response.issue}</h3>
+                          </div>
+                          <button 
+                            onClick={() => {
+                              const textToSpeak = `${result.farmer_response.issue}. ${result.farmer_response.explanation}. ${t('actions')}: ${result.farmer_response.immediate_actions}`;
+                              speak(textToSpeak);
+                            }}
+                            className={cn(
+                              "px-6 py-3 rounded-2xl border border-white/10 transition-all flex items-center gap-3 font-bold text-sm",
+                              isSpeaking ? "bg-emerald-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]" : "bg-white/5 text-emerald-400 hover:bg-white/10"
+                            )}
+                          >
+                            <Volume2 className={cn("w-5 h-5", isSpeaking && "animate-pulse")} />
+                            {isSpeaking ? t('stop_listening') : t('listen')}
+                          </button>
                         </div>
-                        <button 
-                          onClick={() => speak(`${result.farmer_response.issue}. ${result.farmer_response.explanation}`)}
-                          className={cn(
-                            "p-4 rounded-2xl border border-white/10 transition-all",
-                            isSpeaking ? "bg-emerald-500 text-white" : "bg-white/5 text-emerald-400 hover:bg-white/10"
-                          )}
-                        >
-                          <Activity className={cn("w-6 h-6", isSpeaking && "animate-pulse")} />
-                        </button>
                       </div>
 
                       <div className="grid md:grid-cols-2 gap-6">
@@ -877,20 +973,91 @@ export default function App() {
 
         {view === 'map' && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
-            <div className="glass-card rounded-[3.5rem] p-10 border-white/10 shadow-2xl h-[700px] relative overflow-hidden">
-              <div className="absolute top-8 left-8 z-[1000] space-y-4">
-                <div className="p-6 bg-[#020617]/80 backdrop-blur-xl rounded-3xl border border-white/10 shadow-2xl max-w-xs">
-                  <h3 className="text-xl font-black font-display mb-2">Live Intelligence Map</h3>
-                  <p className="text-xs text-white/60 leading-relaxed">Real-time disease clusters and spread patterns aggregated from the Distributed Crop Intelligence Network.</p>
-                </div>
-                <div className="p-4 bg-[#020617]/80 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl flex items-center gap-4">
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 bg-red-500 rounded-full shadow-[0_0_10px_rgba(239,68,68,0.5)]" />
-                    <span className="text-[10px] font-bold uppercase tracking-widest">High Risk</span>
+            <div className="glass-card rounded-[3.5rem] p-6 border-white/10 shadow-2xl h-[750px] relative overflow-hidden">
+              {/* Map Controls Overlay */}
+              <div className="absolute top-8 left-8 z-[1000] space-y-4 w-80">
+                <div className="p-6 bg-[#020617]/90 backdrop-blur-2xl rounded-[2rem] border border-white/10 shadow-2xl">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center">
+                      <Globe className="w-5 h-5 text-white" />
+                    </div>
+                    <h3 className="text-lg font-black font-display">Global Intelligence</h3>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 bg-emerald-500 rounded-full shadow-[0_0_10px_rgba(16,185,129,0.5)]" />
-                    <span className="text-[10px] font-bold uppercase tracking-widest">Monitored</span>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <p className="text-[8px] font-black text-white/30 uppercase tracking-widest mb-2">Filter by Crop</p>
+                      <select 
+                        value={mapFilter.crop}
+                        onChange={e => setMapFilter(prev => ({ ...prev, crop: e.target.value }))}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-xs font-bold outline-none focus:border-emerald-500"
+                      >
+                        <option value="all">All Crops</option>
+                        <option value="wheat">Wheat</option>
+                        <option value="rice">Rice</option>
+                        <option value="cotton">Cotton</option>
+                        <option value="corn">Corn</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <p className="text-[8px] font-black text-white/30 uppercase tracking-widest mb-2">Severity Level</p>
+                      <div className="flex gap-2">
+                        {['all', 'low', 'medium', 'high'].map(s => (
+                          <button
+                            key={s}
+                            onClick={() => setMapFilter(prev => ({ ...prev, severity: s }))}
+                            className={cn(
+                              "flex-1 py-2 rounded-lg text-[8px] font-black uppercase tracking-widest border transition-all",
+                              mapFilter.severity === s ? "bg-emerald-500 border-emerald-400 text-white" : "bg-white/5 border-white/10 text-white/40 hover:bg-white/10"
+                            )}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Outbreak Alert Panel */}
+                {outbreaks.length > 0 && (
+                  <motion.div 
+                    initial={{ x: -20, opacity: 0 }}
+                    animate={{ x: 0, opacity: 1 }}
+                    className="p-6 bg-red-500/10 backdrop-blur-2xl rounded-[2rem] border border-red-500/20 shadow-2xl"
+                  >
+                    <div className="flex items-center gap-2 mb-3">
+                      <AlertTriangle className="w-4 h-4 text-red-500 animate-pulse" />
+                      <p className="text-[10px] font-black text-red-500 uppercase tracking-widest">Active Outbreaks ({outbreaks.length})</p>
+                    </div>
+                    <div className="space-y-3">
+                      {outbreaks.slice(0, 2).map((ob, i) => (
+                        <div key={i} className="text-xs">
+                          <p className="font-black text-white">{ob.issue}</p>
+                          <p className="text-white/40 text-[10px]">{ob.count} verified cases in cluster</p>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+
+              {/* Map Legend */}
+              <div className="absolute bottom-8 right-8 z-[1000] p-4 bg-[#020617]/80 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl flex flex-col gap-3">
+                <p className="text-[8px] font-black text-white/30 uppercase tracking-widest">Map Legend</p>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    <div className="w-3 h-3 bg-red-500 rounded-full" />
+                    <span className="text-[10px] font-bold text-white/60">Critical Outbreak</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="w-3 h-3 bg-orange-500 rounded-full" />
+                    <span className="text-[10px] font-bold text-white/60">High Risk Zone</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="w-3 h-3 bg-emerald-500 rounded-full" />
+                    <span className="text-[10px] font-bold text-white/60">Monitored Case</span>
                   </div>
                 </div>
               </div>
@@ -903,33 +1070,144 @@ export default function App() {
               >
                 <TileLayer
                   url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                  attribution='&copy; CARTO'
                 />
-                {networkReports.map((report) => (
-                  <CircleMarker 
-                    key={report.id}
-                    center={[report.lat || 0, report.lng || 0]}
-                    radius={report.severity_score * 2 || 10}
-                    pathOptions={{ 
-                      fillColor: report.severity_score > 7 ? '#ef4444' : '#10b981',
-                      color: report.severity_score > 7 ? '#ef4444' : '#10b981',
-                      weight: 1,
-                      fillOpacity: 0.4
-                    }}
-                  >
-                    <Popup>
-                      <div className="p-2 bg-[#020617] text-white rounded-lg">
-                        <p className="font-black text-emerald-400 uppercase text-[10px] tracking-widest mb-1">{report.crop_type}</p>
-                        <p className="font-bold text-sm mb-2">{report.issue}</p>
-                        <div className="flex justify-between items-center text-[8px] font-black uppercase tracking-widest text-white/40">
-                          <span>Severity: {report.severity_score}/10</span>
-                          <span>{new Date(report.timestamp?.toDate()).toLocaleDateString()}</span>
+                
+                <MarkerClusterGroup
+                  chunkedLoading
+                  maxClusterRadius={50}
+                  polygonOptions={{ fillColor: '#10b981', color: '#10b981', weight: 0.5, opacity: 0.1, fillOpacity: 0.05 }}
+                >
+                  {filteredReports.map((report) => (
+                    <CircleMarker 
+                      key={report.id}
+                      center={[report.lat || 0, report.lng || 0]}
+                      radius={report.severity_score * 1.5 + 5}
+                      pathOptions={{ 
+                        fillColor: report.severity_score > 7 ? '#ef4444' : report.severity_score > 4 ? '#f97316' : '#10b981',
+                        color: report.severity_score > 7 ? '#ef4444' : report.severity_score > 4 ? '#f97316' : '#10b981',
+                        weight: 2,
+                        fillOpacity: 0.6
+                      }}
+                    >
+                      <Popup className="custom-popup">
+                        <div className="p-4 bg-[#020617] text-white rounded-2xl min-w-[200px]">
+                          <div className="flex justify-between items-start mb-3">
+                            <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded-full text-[8px] font-black uppercase tracking-widest">
+                              {report.crop_type}
+                            </span>
+                            <span className="text-[8px] font-bold text-white/20">
+                              {new Date(report.timestamp?.toDate()).toLocaleDateString()}
+                            </span>
+                          </div>
+                          <h4 className="text-lg font-black mb-1">{report.issue}</h4>
+                          <p className="text-[10px] text-white/40 mb-4 leading-relaxed line-clamp-2">{report.explanation}</p>
+                          
+                          <div className="grid grid-cols-2 gap-2 pt-3 border-t border-white/5">
+                            <div>
+                              <p className="text-[7px] font-black text-white/20 uppercase tracking-widest">Severity</p>
+                              <p className="text-xs font-black">{report.severity_score}/10</p>
+                            </div>
+                            <div>
+                              <p className="text-[7px] font-black text-white/20 uppercase tracking-widest">Confidence</p>
+                              <p className="text-xs font-black">{Math.round(report.confidence_score * 100)}%</p>
+                            </div>
+                          </div>
+                          
+                          <button 
+                            onClick={() => {
+                              setResult({ farmer_response: report, structured_intelligence: report });
+                              setView('scan');
+                            }}
+                            className="w-full mt-4 py-2 bg-emerald-500 text-white rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-emerald-400 transition-all"
+                          >
+                            View Full Analysis
+                          </button>
                         </div>
-                      </div>
-                    </Popup>
-                  </CircleMarker>
+                      </Popup>
+                    </CircleMarker>
+                  ))}
+                </MarkerClusterGroup>
+
+                {/* Outbreak Heat Zones */}
+                {outbreaks.map((ob, i) => (
+                  <CircleMarker
+                    key={`ob-${i}`}
+                    center={[ob.lat, ob.lng]}
+                    radius={40}
+                    pathOptions={{
+                      fillColor: '#ef4444',
+                      color: '#ef4444',
+                      weight: 0,
+                      fillOpacity: 0.1
+                    }}
+                  />
                 ))}
               </MapContainer>
+            </div>
+
+            {/* Map Insights Bento */}
+            <div className="grid grid-cols-12 gap-6">
+              <div className="col-span-12 lg:col-span-4 glass-card rounded-[2.5rem] p-8 border-white/10 shadow-2xl">
+                <div className="flex items-center gap-3 mb-6">
+                  <BarChart3 className="w-5 h-5 text-emerald-400" />
+                  <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Distribution</p>
+                </div>
+                <div className="h-[200px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={[
+                          { name: 'Wheat', value: networkReports.filter(r => r.crop_type?.toLowerCase() === 'wheat').length },
+                          { name: 'Rice', value: networkReports.filter(r => r.crop_type?.toLowerCase() === 'rice').length },
+                          { name: 'Cotton', value: networkReports.filter(r => r.crop_type?.toLowerCase() === 'cotton').length },
+                          { name: 'Other', value: networkReports.filter(r => !['wheat', 'rice', 'cotton'].includes(r.crop_type?.toLowerCase())).length }
+                        ]}
+                        innerRadius={60}
+                        outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="value"
+                      >
+                        {['#10b981', '#3b82f6', '#f59e0b', '#6b7280'].map((color, index) => (
+                          <Cell key={`cell-${index}`} fill={color} />
+                        ))}
+                      </Pie>
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#020617', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '1rem' }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              <div className="col-span-12 lg:col-span-8 glass-card rounded-[2.5rem] p-8 border-white/10 shadow-2xl">
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3">
+                    <TrendingUp className="w-5 h-5 text-emerald-400" />
+                    <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Network Growth</p>
+                  </div>
+                  <p className="text-[10px] font-bold text-white/40">Last 30 Days</p>
+                </div>
+                <div className="h-[200px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={[
+                      { name: 'W1', cases: 12 },
+                      { name: 'W2', cases: 19 },
+                      { name: 'W3', cases: 15 },
+                      { name: 'W4', cases: 27 },
+                      { name: 'W5', cases: networkReports.length }
+                    ]}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
+                      <XAxis dataKey="name" stroke="#ffffff20" fontSize={10} />
+                      <YAxis stroke="#ffffff20" fontSize={10} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#020617', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '1rem' }}
+                      />
+                      <Line type="monotone" dataKey="cases" stroke="#10b981" strokeWidth={3} dot={{ fill: '#10b981' }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
             </div>
           </motion.div>
         )}
@@ -980,5 +1258,6 @@ export default function App() {
         )}
       </main>
     </div>
+    </ErrorBoundary>
   );
 }
