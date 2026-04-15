@@ -1,0 +1,14 @@
+{
+  "name": "AgriFuse",
+  "description": "Multimodal agricultural intelligence system for crop health analysis and global outbreak detection.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "multimodal_analysis",
+    "disease_detection",
+    "farmer_guidance"
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Stores user profile information and preferences.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "location": { "type": "string" },
+        "language": { "type": "string", "enum": ["en", "hi", "es", "fr"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "FarmProfile": {
+      "title": "FarmProfile",
+      "description": "Stores farm-specific details for personalized intelligence.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "farmSize": { "type": "number" },
+        "cropsGrown": { "type": "array", "items": { "type": "string" } },
+        "location": { "type": "object", "properties": { "lat": { "type": "number" }, "lng": { "type": "number" } } },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId"]
+    },
+    "FarmReport": {
+      "title": "FarmReport",
+      "description": "Stores crop health analysis reports with geospatial data.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "crop_type": { "type": "string" },
+        "suspected_issue": { "type": "string" },
+        "issue": { "type": "string" },
+        "severity": { "type": "string" },
+        "severity_score": { "type": "number" },
+        "explanation": { "type": "string" },
+        "risk_factors": { "type": "string" },
+        "mitigation_strategy": { "type": "string" },
+        "immediate_actions": { "type": "string" },
+        "long_term_prevention": { "type": "string" },
+        "urgency_level": { "type": "string" },
+        "category": { "type": "string" },
+        "spread_type": { "type": "string" },
+        "duration_days": { "type": "string" },
+        "confidence_score": { "type": "number" },
+        "economic_risk": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "imageUrl": { "type": "string" }
+      },
+      "required": ["userId", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile documents."
+    },
+    "/farms/{userId}": {
+      "schema": "FarmProfile",
+      "description": "User farm profile documents."
+    },
+    "/reports/{reportId}": {
+      "schema": "FarmReport",
+      "description": "Global farm reports for outbreak detection."
+    }
+  }
+}
